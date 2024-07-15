@@ -2,7 +2,8 @@ import os
 import logging
 import requests
 
-from typing import List, Union
+from typing import List, Union, Dict
+import re
 
 from apps.ollama.main import (
     generate_ollama_embeddings,
@@ -23,9 +24,194 @@ from typing import Optional
 from utils.misc import get_last_user_message, add_or_update_system_message
 from config import SRC_LOG_LEVELS, CHROMA_CLIENT
 
+from fastapi import HTTPException
+from apps.webui.models.documents import Documents
+from config import DOCS_DIR
+from functools import lru_cache
+
+
+
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["RAG"])
 
+@lru_cache(maxsize=100)
+def get_rag_content_cached(rag_type: str, rag_name: str) -> str:
+    return get_rag_content(rag_type, rag_name)
+
+def get_available_rag_sources() -> List[Dict[str, Union[str, List[str]]]]:
+    """
+    Get a list of available RAG sources including local files and ChromaDB collections.
+    
+    Returns:
+        List[Dict[str, Union[str, List[str]]]]: A list of dictionaries, each representing a RAG source.
+        For files: {"type": "file", "collection_name": filename}
+        For collections: {"type": "collection", "collection_names": [collection_name]}
+    """
+    rag_sources = []
+
+    if os.path.exists(DOCS_DIR):
+        for filename in os.listdir(DOCS_DIR):
+            if os.path.isfile(os.path.join(DOCS_DIR, filename)):
+                rag_sources.append({
+                    "type": "file",
+                    "collection_name": filename
+                })
+    else:
+        log.warning(f"========== Directory '{DOCS_DIR}' does not exist ==========")
+                    
+    # Get ChromaDB collections
+    try:
+        collections = CHROMA_CLIENT.list_collections()
+        for collection in collections:
+            rag_sources.append({
+                "type": "collection",
+                "collection_names": [collection.name]
+            })
+    except Exception as e:
+        log.error(f"Error fetching ChromaDB collections: {e}")
+
+    return rag_sources
+
+async def get_rag_content(rag_type: str, rag_name: str) -> str:
+    """
+    Retrieve content based on the RAG reference type and name.
+    """
+    if rag_type == "file":
+        file_path = os.path.join(DOCS_DIR, rag_name)
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File '{rag_name}' not found")
+        with open(file_path, 'r') as file:
+            return file.read()
+    elif rag_type == "collection":
+        try:
+            collection = CHROMA_CLIENT.get_collection(name=rag_name)
+            results = collection.get()
+            if results['documents']:
+                return "\n\n".join(results['documents'][0])
+            else:
+                raise FileNotFoundError(f"Collection '{rag_name}' is empty")
+        except Exception as e:
+            raise FileNotFoundError(f"Collection '{rag_name}' not found or error occurred: {str(e)}")
+    else:
+        raise ValueError(f"Invalid RAG type: {rag_type}")
+    
+    
+# def enhance_prompt_with_rag(messages: List[Dict[str, str]], rag_content: str) -> List[Dict[str, str]]:
+def enhance_prompt_with_rag(messages: List[dict], rag_content: str) -> List[dict]:
+    """
+    Enhance the chat messages with RAG content.
+    """
+    rag_message = {
+        "role": "system",
+        "content": f"Here is some relevant information:\n\n{rag_content}\n\nPlease use this information to inform your response to the user's query."
+    }
+    
+    # Insert the RAG message before the last user message
+    insert_index = len(messages) - 1
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i]["role"] == "user":
+            insert_index = i
+            break
+    
+    messages.insert(insert_index, rag_message)
+    return messages
+
+def get_rag_context(
+    files,
+    messages,
+    embedding_function,
+    k,
+    reranking_function,
+    r,
+    hybrid_search,
+):
+    log.debug(f"files: {files} {messages} {embedding_function} {reranking_function}")
+    query = get_last_user_message(messages)
+
+    # Check for RAG references in the query
+    rag_reference_match = re.search(r'#(file|collection):\s*(\S+)', query)
+    if rag_reference_match:
+        rag_type, rag_name = rag_reference_match.groups()
+        try:
+            rag_content = get_rag_content_cached(rag_type, rag_name)
+            # Remove the RAG reference from the query
+            query = re.sub(r'#(file|collection):\s*(\S+)', '', query).strip()
+            return rag_content, [{"source": f"{rag_type}:{rag_name}", "content": rag_content}]
+        except FileNotFoundError as e:
+            log.warning(f"RAG content not found: {str(e)}")
+            # Continue with normal search if RAG content is not found
+
+    # Existing code for context retrieval
+    extracted_collections = []
+    relevant_contexts = []
+
+    for file in files:
+        context = None
+
+        collection_names = (
+            file["collection_names"]
+            if file["type"] == "collection"
+            else [file["collection_name"]]
+        )
+
+        collection_names = set(collection_names).difference(extracted_collections)
+        if not collection_names:
+            log.debug(f"skipping {file} as it has already been extracted")
+            continue
+
+        try:
+            if file["type"] == "text":
+                context = file["content"]
+            else:
+                if hybrid_search:
+                    context = query_collection_with_hybrid_search(
+                        collection_names=collection_names,
+                        query=query,
+                        embedding_function=embedding_function,
+                        k=k,
+                        reranking_function=reranking_function,
+                        r=r,
+                    )
+                else:
+                    context = query_collection(
+                        collection_names=collection_names,
+                        query=query,
+                        embedding_function=embedding_function,
+                        k=k,
+                    )
+        except Exception as e:
+            log.exception(e)
+            context = None
+
+        if context:
+            relevant_contexts.append({**context, "source": file})
+
+        extracted_collections.extend(collection_names)
+
+    contexts = []
+    citations = []
+
+    for context in relevant_contexts:
+        try:
+            if "documents" in context:
+                contexts.append(
+                    "\n\n".join(
+                        [text for text in context["documents"][0] if text is not None]
+                    )
+                )
+
+                if "metadatas" in context:
+                    citations.append(
+                        {
+                            "source": context["source"],
+                            "document": context["documents"][0],
+                            "metadata": context["metadatas"][0],
+                        }
+                    )
+        except Exception as e:
+            log.exception(e)
+
+    return "\n\n".join(contexts), citations
 
 def query_doc(
     collection_name: str,
