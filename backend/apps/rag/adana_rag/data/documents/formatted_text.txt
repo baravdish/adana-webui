@@ -1,0 +1,14 @@
+# This is a header
+
+This is a paragraph.
+
+## This is a smaller header
+
+Here is a grocery list of fruits
+
+- Apples
+- Oranges
+- Pears
+- Peaches
+- Kiwis
+- Avocado

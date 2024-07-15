@@ -49,6 +49,7 @@ import uuid
 import json
 
 import sentence_transformers
+from simple_rag_pipeline import Pipeline
 
 from apps.webui.models.documents import (
     Documents,
@@ -133,10 +134,46 @@ from config import (
 
 from constants import ERROR_MESSAGES
 
+
+# ============== Adana ============== 
+from fastapi import LifeSpan
+from typing import AsyncGenerator
+import nltk
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import tiktoken
+from numpy import where as npwhere
+from numpy import argsort as npargsort
+from adana_rag.simple_rag_pipeline import Pipeline
+nltk.download('punkt')
+# ===================================
+
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["RAG"])
 
-app = FastAPI()
+# ================== Adana ==================
+
+# Initialize pipeline
+pipeline_adana = Pipeline()
+
+async def app_lifespan(app: FastAPI) -> AsyncGenerator:
+    await pipeline_adana.on_startup()
+    yield
+    await pipeline_adana.on_shutdown()
+
+class ChatRequest(BaseModel):
+    user_message: str
+
+class ChatResponse(BaseModel):
+    enhanced_prompt: str
+
+
+
+# app = FastAPI()
+app = lifespan=LifeSpan(app_lifespan)
+
+# ==========================================
+
 
 app.state.config = AppConfig()
 
@@ -184,6 +221,104 @@ app.state.config.TAVILY_API_KEY = TAVILY_API_KEY
 app.state.config.RAG_WEB_SEARCH_RESULT_COUNT = RAG_WEB_SEARCH_RESULT_COUNT
 app.state.config.RAG_WEB_SEARCH_CONCURRENT_REQUESTS = RAG_WEB_SEARCH_CONCURRENT_REQUESTS
 
+
+
+'''
+Lifespan
+
+Starlette applications can register a lifespan handler for dealing with code that needs to run before the application starts up, or when the application is shutting down.
+
+import contextlib
+
+from starlette.applications import Starlette
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    async with some_async_resource():
+        print("Run at startup!")
+        yield
+        print("Run on shutdown!")
+
+
+routes = [
+    ...
+]
+
+app = Starlette(routes=routes, lifespan=lifespan)
+
+Starlette will not start serving any incoming requests until the lifespan has been run.
+
+The lifespan teardown will run once all connections have been closed, and any in-process background tasks have completed.
+
+Consider using anyio.create_task_group() for managing asynchronous tasks.
+Lifespan State
+
+The lifespan has the concept of state, which is a dictionary that can be used to share the objects between the lifespan, and the requests.
+
+import contextlib
+from typing import AsyncIterator, TypedDict
+
+import httpx
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
+
+
+class State(TypedDict):
+    http_client: httpx.AsyncClient
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: Starlette) -> AsyncIterator[State]:
+    async with httpx.AsyncClient() as client:
+        yield {"http_client": client}
+
+
+async def homepage(request: Request) -> PlainTextResponse:
+    client = request.state.http_client
+    response = await client.get("https://www.example.com")
+    return PlainTextResponse(response.text)
+
+
+app = Starlette(
+    lifespan=lifespan,
+    routes=[Route("/", homepage)]
+)
+
+The state received on the requests is a shallow copy of the state received on the lifespan handler.
+Running lifespan in tests
+
+You should use TestClient as a context manager, to ensure that the lifespan is called.
+
+from example import app
+from starlette.testclient import TestClient
+
+
+def test_homepage():
+    with TestClient(app) as client:
+        # Application's lifespan is called on entering the block.
+        response = client.get("/")
+        assert response.status_code == 200
+
+    # And the lifespan's teardown is run when exiting the block.
+'''
+
+# ================== Adana ==================
+@app.post("/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    enhanced_prompt = pipeline_adana.pipe(request.user_message, "local_model", [], {})
+    return ChatResponse(enhanced_prompt=enhanced_prompt)
+
+@app.get("/my_rag")
+async def get_pipeline_info():
+    return {
+        "total_chunks": pipeline_adana.get_chunk_info()["total_chunks"],
+        "avg_chunk_length": pipeline_adana.get_chunk_info()["avg_chunk_length"]
+    }
+    
+# ==========================================    
 
 def update_embedding_model(
     embedding_model: str,
@@ -1054,7 +1189,7 @@ def get_loader(filename: str, file_content_type: str, file_path: str):
     elif (
         file_content_type
         == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        or file_ext in ["doc", "docx"]
+        or file_ext in ["doc", "docx", "txt"]
     ):
         loader = Docx2txtLoader(file_path)
     elif file_content_type in [
@@ -1359,6 +1494,15 @@ class SafeWebBaseLoader(WebBaseLoader):
                 # Log the error and continue with the next URL
                 log.error(f"Error loading {path}: {e}")
 
+local_text_chunks = [
+    "This is the first text chunk.",
+    "Here is another piece of information.",
+    "More data to be used in the prompt."
+]
+
+@app.get("/text_chunks/", response_model=List[str])
+async def get_text_chunks():
+    return local_text_chunks
 
 if ENV == "dev":
 
@@ -1369,3 +1513,4 @@ if ENV == "dev":
     @app.get("/ef/{text}")
     async def get_embeddings_text(text: str):
         return {"result": app.state.EMBEDDING_FUNCTION(text)}
+
