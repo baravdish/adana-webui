@@ -24,12 +24,12 @@ from typing import Optional
 from utils.misc import get_last_user_message, add_or_update_system_message
 from config import SRC_LOG_LEVELS, CHROMA_CLIENT
 
+# =============== Adana ===============
 from fastapi import HTTPException
 from apps.webui.models.documents import Documents
-from config import DOCS_DIR
+from backend.config import DOCS_DIR
 from functools import lru_cache
-
-
+# =============== Adana ===============
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["RAG"])

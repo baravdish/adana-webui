@@ -8,6 +8,9 @@ sys.path.insert(0, project_root)
 
 from backend.apps.rag.utils import get_rag_content, get_rag_context, enhance_prompt_with_rag, get_available_rag_sources
 
+from backend.config import DOCS_DIR
+
+
 # Mock ChromaDB client
 @pytest.fixture
 def mock_chroma_client():
@@ -15,26 +18,31 @@ def mock_chroma_client():
         yield mock_client
 
 # Test get_rag_content
-def test_get_rag_content_file(tmp_path):
+@pytest.mark.asyncio
+async def test_get_rag_content_file(tmp_path):
     file_content = "This is a test file content."
     file_path = tmp_path / "short_text.txt"
     file_path.write_text(file_content)
     
-    with patch('backend.apps.rag.utils.DOCS_DIR', str(tmp_path)):
-        content = get_rag_content("file", "test_file.txt")
+    with patch('backend.config.DOCS_DIR', str(tmp_path)):
+        content = await get_rag_content("file", "short_text.txt")
         assert content == file_content
 
-def test_get_rag_content_collection(mock_chroma_client):
+
+@pytest.mark.asyncio
+async def test_get_rag_content_collection(mock_chroma_client):
     mock_collection = MagicMock()
     mock_collection.get.return_value = {"documents": [["Test collection content"]]}
     mock_chroma_client.get_collection.return_value = mock_collection
     
-    content = get_rag_content("collection", "test_collection")
+    content = await get_rag_content("collection", "test_collection")
     assert content == "Test collection content"
 
-def test_get_rag_content_invalid_type():
+@pytest.mark.asyncio
+async def test_get_rag_content_invalid_type():
     with pytest.raises(ValueError):
-        get_rag_content("invalid_type", "test")
+        await get_rag_content("invalid_type", "test")
+
 
 # Test get_rag_context
 def test_get_rag_context():
@@ -70,7 +78,7 @@ def test_get_available_rag_sources(tmp_path, mock_chroma_client):
     # Mock ChromaDB collections
     mock_chroma_client.list_collections.return_value = [MagicMock(name="test_collection")]
     
-    with patch('apps.rag.utils.DOCS_DIR', str(tmp_path)):
+    with patch('backend.config.DOCS_DIR', str(tmp_path)):
         sources = get_available_rag_sources()
         
         assert len(sources) == 2
