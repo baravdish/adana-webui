@@ -105,6 +105,15 @@ except:
 VERSION = PACKAGE_DATA["version"]
 
 
+####################################
+# DOCS_DIR
+####################################
+DOCS_DIR = os.getenv('DOCS_DIR')
+if not DOCS_DIR:
+    DOCS_DIR = str(BASE_DIR / "data" / "adana-data" / "documents")  # default path if not set in .env
+log.info(f"DOCS_DIR: {DOCS_DIR}")
+
+
 # Function to parse each section
 def parse_section(section):
     items = []
