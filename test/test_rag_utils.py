@@ -48,7 +48,7 @@ async def test_get_rag_content_invalid_type():
 def test_get_rag_context():
     messages = [{"role": "user", "content": "Tell me about #file:short_text.txt"}]
     
-    with patch('apps.rag.utils.get_rag_content') as mock_get_content:
+    with patch('backend.apps.rag.utils.get_rag_content') as mock_get_content:
         mock_get_content.return_value = "Test file content"
         context, citations = get_rag_context([], messages, None, 5, None, 0.5, False)
         
