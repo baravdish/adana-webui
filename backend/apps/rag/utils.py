@@ -2,7 +2,7 @@ import os
 import logging
 import requests
 
-from typing import List, Union, Dict
+from typing import List, Union, Dict, Tuple, Callable
 import re
 
 from apps.ollama.main import (
@@ -27,8 +27,10 @@ from config import SRC_LOG_LEVELS, CHROMA_CLIENT
 # =============== Adana ===============
 from fastapi import HTTPException
 from apps.webui.models.documents import Documents
-from backend.config import DOCS_DIR
+from backend.config import DOCS_TEXT_DIR, DOCS_DIR
+import backend.config
 from functools import lru_cache
+import knowledgebank
 # =============== Adana ===============
 
 log = logging.getLogger(__name__)
@@ -47,37 +49,39 @@ def get_available_rag_sources() -> List[Dict[str, Union[str, List[str]]]]:
         For files: {"type": "file", "collection_name": filename}
         For collections: {"type": "collection", "collection_names": [collection_name]}
     """
-    rag_sources = []
+    l_d_rag_sources = []
 
-    if os.path.exists(DOCS_DIR):
-        for filename in os.listdir(DOCS_DIR):
-            if os.path.isfile(os.path.join(DOCS_DIR, filename)):
-                rag_sources.append({
+    if os.path.exists(DOCS_TEXT_DIR):
+        for filename in os.listdir(DOCS_TEXT_DIR):
+            if os.path.isfile(os.path.join(DOCS_TEXT_DIR, filename)):
+                l_d_rag_sources.append({
                     "type": "file",
                     "collection_name": filename
                 })
     else:
-        log.warning(f"========== Directory '{DOCS_DIR}' does not exist ==========")
+        log.warning(f"========== Directory '{DOCS_TEXT_DIR}' does not exist ==========")
                     
     # Get ChromaDB collections
     try:
         collections = CHROMA_CLIENT.list_collections()
         for collection in collections:
-            rag_sources.append({
+            l_d_rag_sources.append({
                 "type": "collection",
                 "collection_names": [collection.name]
             })
     except Exception as e:
         log.error(f"Error fetching ChromaDB collections: {e}")
 
-    return rag_sources
+    return l_d_rag_sources
 
 async def get_rag_content(rag_type: str, rag_name: str) -> str:
     """
     Retrieve content based on the RAG reference type and name.
     """
     if rag_type == "file":
-        file_path = os.path.join(DOCS_DIR, rag_name)
+        print("rag_name", rag_name)
+        print("XXXXXXXXXXXXXXXXXXXXXXx DOCS_TEXT_DIR XXXXXXXXXXXXXXXXXXXx´ ", DOCS_TEXT_DIR)
+        file_path = os.path.join(DOCS_TEXT_DIR, rag_name)
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File '{rag_name}' not found")
         with open(file_path, 'r') as file:
@@ -85,9 +89,9 @@ async def get_rag_content(rag_type: str, rag_name: str) -> str:
     elif rag_type == "collection":
         try:
             collection = CHROMA_CLIENT.get_collection(name=rag_name)
-            results = collection.get()
-            if results['documents']:
-                return "\n\n".join(results['documents'][0])
+            d_results = collection.get()
+            if d_results['documents']:
+                return "\n\n".join(d_results['documents'][0])
             else:
                 raise FileNotFoundError(f"Collection '{rag_name}' is empty")
         except Exception as e:
@@ -421,43 +425,143 @@ def get_embedding_function(
 
         return lambda query: generate_multiple(query, func)
 
-
 def get_rag_context(
-    files,
-    messages,
+    query: str,
+    knowledge_base: knowledgebank.KnowledgeBase,
+    embedding_function: Callable,
+    k: int,
+    reranking_function: Optional[Callable] = None,
+    relevance_threshold: float = 0.0
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Retrieve relevant context for a given query from a knowledge base.
+
+    :param query: The user's query
+    :param knowledge_base: An object representing the accessible knowledge
+    :param embedding_function: Function to create embeddings
+    :param k: Number of top results to retrieve
+    :param reranking_function: Optional function to rerank results
+    :param relevance_threshold: Minimum relevance score for inclusion
+    :return: Tuple of (context string, list of citations)
+    """
+    # Retrieve relevant documents
+    relevant_docs = knowledge_base.retrieve(query, k, embedding_function)
+
+    # Rerank if a reranking function is provided
+    if reranking_function:
+        relevant_docs = reranking_function(query, relevant_docs)
+
+    # Filter by relevance threshold
+    relevant_docs = [doc for doc in relevant_docs if doc.relevance_score >= relevance_threshold]
+
+    # Compile context and citations
+    context = "\n\n".join(doc.content for doc in relevant_docs)
+    citations = [{"source": doc.source, "content": doc.content} for doc in relevant_docs]
+
+    return context, citations
+
+def get_rag_context_old(
+    l_d_files,
+    l_d_messages,
     embedding_function,
     k,
     reranking_function,
     r,
-    hybrid_search,
+    use_hybrid_search,
 ):
-    log.debug(f"files: {files} {messages} {embedding_function} {reranking_function}")
-    query = get_last_user_message(messages)
+    """
+    Retrieves relevant context for a given query using RAG (Retrieval-Augmented Generation).
+
+    Args:
+        files (List[Dict[str, Any]]): A list of dictionaries representing files or collections.
+            Each dictionary should have the following structure:
+            - For text files: {"type": "text", "content": str, "collection_name": str}
+            - For collections: {"type": "collection", "collection_names": List[str]}
+
+        messages (List[Dict[str, str]]): A list of message dictionaries, each containing 'role' and 'content'.
+            The last user message is used as the query.
+
+        embedding_function (Callable): A function to generate embeddings for the query and documents.
+
+        k (int): The number of top results to retrieve.
+
+        reranking_function (Optional[Callable]): A function to rerank the retrieved results. Can be None.
+
+        r (float): A relevance threshold for filtering results.
+
+        hybrid_search (bool): If True, use hybrid search (combination of semantic and keyword search).
+                              If False, use only semantic search.
+
+    Returns:
+        Tuple[str, List[Dict[str, Any]]]: A tuple containing:
+            - A string of concatenated relevant context.
+            - A list of citation dictionaries, each containing 'source', 'document', and 'metadata'.
+
+    Note:
+        This function processes the input files/collections, retrieves relevant context based on the query,
+        and returns the context along with citation information.
+        
+    ======= DOCUMENTATION =======
+    For text files:
+        {
+            "type": "text",
+            "content": "The actual text content of the file",
+            "collection_name": "unique_identifier_for_this_file"
+        }
+    
+    For collections:
+    {
+        "type": "collection",
+        "collection_names": ["name_of_collection1", "name_of_collection2", ...]
+    }
+            
+    """
+    
+    log.debug(f"files: {l_d_files} {l_d_messages} {embedding_function} {reranking_function}")
+    query = get_last_user_message(l_d_messages)
 
     extracted_collections = []
-    relevant_contexts = []
+    l_relevant_contexts = []
+    print(f"=====================utils.py files {len(l_d_files)}")
+    print(f"=====================utils.py file: {l_d_files}")
+    
+    # {"type": "text", "content": "Test file content", "collection_name": STR_TEST_FILE_NAME},
+    # {"type": "collection", "collection_names": ["collection1", "collection2"]}
 
-    for file in files:
-        context = None
-
-        collection_names = (
+    for file in l_d_files:
+        d_context = None
+        
+        l_collection_names = (
             file["collection_names"]
             if file["type"] == "collection"
             else [file["collection_name"]]
         )
 
-        collection_names = set(collection_names).difference(extracted_collections)
-        if not collection_names:
+        
+        for collection in l_collection_names:
+            print(f"=====================utils.py collection: {collection}")
+            print(f"=====================utils.py file: {file}")
+            print(f"=====================utils.py file type: {file['type']}")
+            if "content" in file:
+                print(f"=====================utils.py file content: {file['content']}")
+            if "collection_name" in file:
+                print(f"=====================utils.py file collection_name: {file['collection_name']}")
+            if "collection_names" in file:
+                print(f"=====================utils.py file collection_names: {file['collection_names']}")
+                                
+        l_collection_names = set(l_collection_names).difference(extracted_collections)
+
+        if not l_collection_names:
             log.debug(f"skipping {file} as it has already been extracted")
             continue
 
         try:
             if file["type"] == "text":
-                context = file["content"]
+                d_context = {"content": file["content"]}
             else:
-                if hybrid_search:
-                    context = query_collection_with_hybrid_search(
-                        collection_names=collection_names,
+                if use_hybrid_search:
+                    d_context = query_collection_with_hybrid_search(
+                        collection_names=l_collection_names,
                         query=query,
                         embedding_function=embedding_function,
                         k=k,
@@ -465,45 +569,79 @@ def get_rag_context(
                         r=r,
                     )
                 else:
-                    context = query_collection(
-                        collection_names=collection_names,
+                    d_context = query_collection(
+                        collection_names=l_collection_names,
                         query=query,
                         embedding_function=embedding_function,
                         k=k,
                     )
         except Exception as e:
             log.exception(e)
-            context = None
+            d_context = None
 
-        if context:
-            relevant_contexts.append({**context, "source": file})
+        if d_context:
+            l_relevant_contexts.append({**d_context, "source": file})
 
-        extracted_collections.extend(collection_names)
+        extracted_collections.extend(l_collection_names)
 
-    context_string = ""
 
-    citations = []
-    for context in relevant_contexts:
+
+    str_context_string = ""
+
+    l_d_citations = []
+    for d_context in l_relevant_contexts:        
+        
         try:
-            if "documents" in context:
-                context_string += "\n\n".join(
-                    [text for text in context["documents"][0] if text is not None]
+            if "documents" in d_context:
+                print(f"ADDS d_context['documents'][0] {d_context['documents'][0]} TO STRING {str_context_string}")
+                
+                str_context_string += "\n\n".join(
+                    [text for text in d_context["documents"][0] if text is not None]
                 )
-
-                if "metadatas" in context:
-                    citations.append(
+            elif "content" in d_context:  # Handle the text file case
+                print(f"ADDS d_context['content'] {d_context['content']} TO STRING {str_context_string}")
+                str_context_string += d_context["content"]
+                if "metadatas" in d_context:
+                    l_d_citations.append(
                         {
-                            "source": context["source"],
-                            "document": context["documents"][0],
-                            "metadata": context["metadatas"][0],
+                            "source": d_context["source"],
+                            "document": d_context["documents"][0],
+                            "metadata": d_context["metadatas"][0],
                         }
                     )
+            else:  # Handle the text file case
+                l_d_citations.append(
+                    {
+                        "source": d_context["source"],
+                        "document": d_context["content"],
+                        "metadata": {},
+                    }
+                )
         except Exception as e:
             log.exception(e)
+        
+        for key, value in d_context.items():
+            print(f"=====================utils.py d_context.key: {key}")
+            print(f"=====================utils.py d_context.value: {value}")
+        print(f"=====================utils.py str_context_string: {str_context_string}")
+        
+    str_context_string = str_context_string.strip()
 
-    context_string = context_string.strip()
+    print(f"=====================ENDING utils.py str_context_string: {str_context_string}")
+    print(f"=====================ENDING utils.py LENGTH l_d_citations: {len(l_d_citations)}")
+    print(f"=====================ENDING utils.py l_d_citations: {l_d_citations}")
+    # print(f"=====================ENDING utils.py l_d_citations[0]: {l_d_citations[0]}")
+    for citation in l_d_citations:
+        # Access the dictionary items using the citation variable
+        # Do something with the citation dictionary
+        # For example, print the values of 'source', 'document', and 'metadata'
+        print("Source:", citation["source"])
+        print("Document:", citation["document"])
+        print("Metadata:", citation["metadata"])
+        print()  # Print an empty line for separation
 
-    return context_string, citations
+    
+    return str_context_string, l_d_citations
 
 
 def get_model_path(model: str, update_model: bool = False):

@@ -94,6 +94,7 @@ from config import (
     SRC_LOG_LEVELS,
     UPLOAD_DIR,
     DOCS_DIR,
+    DOCS_TEXT_DIR,
     RAG_TOP_K,
     RAG_RELEVANCE_THRESHOLD,
     RAG_EMBEDDING_ENGINE,

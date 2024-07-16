@@ -28,7 +28,8 @@ from constants import ERROR_MESSAGES
 
 BACKEND_DIR = Path(__file__).parent  # the path containing this file
 BASE_DIR = BACKEND_DIR.parent  # the path containing the backend/
-
+print("BACKEND_DIR: ", BACKEND_DIR)
+print("BASE_DIR: ", BASE_DIR)
 print(BASE_DIR)
 
 try:
@@ -106,12 +107,13 @@ VERSION = PACKAGE_DATA["version"]
 
 
 ####################################
-# DOCS_DIR
+# DOCS_TEXT_DIR
 ####################################
-DOCS_DIR = os.getenv('DOCS_DIR')
-if not DOCS_DIR:
-    DOCS_DIR = str(BASE_DIR / "data" / "adana-data" / "documents")  # default path if not set in .env
-log.info(f"DOCS_DIR: {DOCS_DIR}")
+DOCS_TEXT_DIR = os.getenv('DOCS_TEXT_DIR')
+if not DOCS_TEXT_DIR:
+   DOCS_TEXT_DIR = str(BASE_DIR / "data" / "adana-data" / "documents")  # default path if not set in .env
+log.info(f"DOCS_TEXT_DIR: {DOCS_TEXT_DIR}")
+print(f"=========== FROM CONFIG.py ===========: DOCS_TEXT_DIR: {DOCS_TEXT_DIR}")
 
 
 # Function to parse each section
