@@ -6,12 +6,14 @@ from unittest.mock import patch, MagicMock
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
-from typing import List, Union, Dict, Tuple, Callable, Document
+from typing import List, Union, Dict, Tuple, Callable
 
 from backend.apps.rag.utils import get_rag_content, get_rag_context, enhance_prompt_with_rag, get_available_rag_sources
-from backend.apps.rag.knowledgebank import get_rag_context, KnowledgeBase, Document, CompositeKnowledgeBase
+from backend.apps.rag.knowledgebank import KnowledgeBase, MyDocument, DocumentStore, CompositeKnowledgeBase
 
 from backend.config import DOCS_TEXT_DIR
+from langchain_core.documents import Document
+
 
 STR_TEST_FILE_NAME = "test_file.txt"
 
@@ -101,19 +103,36 @@ def test_enhance_prompt_with_rag():
 # Test get_available_rag_sources
 def test_get_available_rag_sources(tmp_path, mock_chroma_client):
     # Create a test file
-    (tmp_path / "short_text.txt").touch()
+    test_file = tmp_path / "short_text.txt"
+    test_file.touch()
     
     # Mock ChromaDB collections
-    mock_chroma_client.list_collections.return_value = [MagicMock(name="test_collection")]
+    mock_collection = MagicMock(name="test_collection")
+    mock_collection.name = "test_collection"
+    mock_chroma_client.list_collections.return_value = [mock_collection]
     
-    with patch('backend.config.DOCS_TEXT_DIR', str(tmp_path)):
-        l_d_sources = get_available_rag_sources()
+    
+    def get_available_rag_sources_wrapper():
+        with patch('os.listdir', return_value=[test_file.name]):
+            return get_available_rag_sources()
         
-        assert len(l_d_sources) == 2
-        assert {"type": "file", "collection_name": STR_TEST_FILE_NAME} in l_d_sources
-        assert {"type": "collection", "collection_names": ["test_collection"]} in l_d_sources
+    
+    # NOTE: Here all sources are available
+    with patch('backend.config.DOCS_TEXT_DIR', str(tmp_path)):
+        # NOTE: Here only the the mock_chroma_client database source files are available
+        with patch('backend.config.CHROMA_CLIENT', mock_chroma_client):
+            l_d_sources = get_available_rag_sources_wrapper() # all files in the mock_chroma_client database
 
 
+        # l_d_sources = get_available_rag_sources() # all files in DOCS_TEXT_DIR
+        
+        # TODO: Print the variable l_d_sources which is a list of dictionaries
+        print(f"Available RAG sources: {l_d_sources}")
+        print(f"Available RAG sources LENGTH: {len(l_d_sources)}")
+        
+    assert len(l_d_sources) == 2, f"Expected 2 sources, but found {len(l_d_sources)}"
+    assert any(source['collection_name'] == 'short_text.txt' and source['type'] == 'file' for source in l_d_sources), "Test file not found in sources"
+    assert any('collection_names' in source and 'test_collection' in source['collection_names'] and source['type'] == 'collection' for source in l_d_sources), "Test collection not found in sources"
 # @pytest.mark.asyncio
 # async def test_get_rag_context():
 # def test_get_rag_context():
@@ -165,28 +184,50 @@ def test_get_available_rag_sources(tmp_path, mock_chroma_client):
 
 
 def test_get_rag_context():
-    # Setup
-    mock_docs = [
-        Document("Content 1", "Source 1", 0.9),
-        Document("Content 2", "Source 2", 0.8),
-        Document("Content 3", "Source 3", 0.7),
-    ]
-    mock_kb = MockKnowledgeBase(mock_docs)
+    doc1 = MyDocument(page_content="This is document 1. Tonight I will go out and jog.",
+                      metadata={"source": "source1"},
+                      id="1",
+                      relevance_score=0.8)
+    doc2 = MyDocument(page_content="This is document 2. This morning I had a cup of tea.",
+                      metadata={"source": "source2"},
+                      id="2",
+                      relevance_score=0.6)
+    doc3 = MyDocument(page_content="This is document 3. Tomorrow at the restaurant I will have dinner at 18.00 o'clock.",
+                      metadata={"source": "source3"},
+                      id="3",
+                      relevance_score=0.7)
+    doc4 = MyDocument(page_content="This is document 4. My dog's name is Pluto.",
+                      metadata={"source": "source4"},
+                      id="4",
+                      relevance_score=0.5)
+    doc5 = MyDocument(page_content="This is document 5. My dog Pluto has a surgery at hospital at 21.00 o'clock tomorrow.",
+                      metadata={"source": "source5"},
+                      id="5",
+                      relevance_score=0.9)
+    
+    doc_store = DocumentStore([doc1, doc2, doc3, doc4, doc5])
+    
+    mock_kb = MockKnowledgeBase(doc_store)
     mock_embedding_func = MagicMock()
-    mock_reranking_func = MagicMock(return_value=mock_docs[::-1])  # Reverse the order
+    
+    # Define a mock reranking function that reverses the order
+    def mock_rerank(query, docs):
+        return list(reversed(docs))
+    
+    mock_reranking_func = MagicMock(side_effect=mock_rerank)
 
     # Test case 1: Basic retrieval
     context, citations = get_rag_context("test query", mock_kb, mock_embedding_func, k=2)
-    assert context == "Content 1\n\nContent 2"
+    assert context == "This is document 1. Tonight I will go out and jog.\n\nThis is document 2. This morning I had a cup of tea."
     assert len(citations) == 2
-    assert citations[0]["source"] == "Source 1"
-    assert citations[1]["source"] == "Source 2"
-    
+    assert citations[0]["source"] == "source1"
+    assert citations[1]["source"] == "source2"
+
     # Test case 2: With reranking
     context, citations = get_rag_context("test query", mock_kb, mock_embedding_func, k=2, reranking_function=mock_reranking_func)
-    assert context == "Content 3\n\nContent 2"
-    assert citations[0]["source"] == "Source 3"
-
+    assert context == "This is document 5. My dog Pluto has a surgery at hospital at 21.00 o'clock tomorrow.\n\nThis is document 4. My dog's name is Pluto."
+    assert citations[0]["source"] == "source5"
+    assert citations[1]["source"] == "source4"
     # Test case 3: With relevance threshold
     context, citations = get_rag_context("test query", mock_kb, mock_embedding_func, k=3, relevance_threshold=0.75)
     assert len(citations) == 2  # Only two documents above the threshold

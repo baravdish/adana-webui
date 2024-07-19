@@ -2,7 +2,7 @@ import os
 import logging
 import requests
 
-from typing import List, Union, Dict, Tuple, Callable
+from typing import List, Union, Dict, Tuple, Callable, Any
 import re
 
 from apps.ollama.main import (
@@ -25,12 +25,18 @@ from utils.misc import get_last_user_message, add_or_update_system_message
 from config import SRC_LOG_LEVELS, CHROMA_CLIENT
 
 # =============== Adana ===============
-from fastapi import HTTPException
+# from fastapi import HTTPException
 from apps.webui.models.documents import Documents
-from backend.config import DOCS_TEXT_DIR, DOCS_DIR
-import backend.config
+from backend.config import DOCS_TEXT_DIR
+# import backend.config
 from functools import lru_cache
-import knowledgebank
+from backend.apps.rag.knowledgebank import KnowledgeBase, DocumentStore, Document, MyDocument
+# In backend/apps/rag/utils.py
+from backend.apps.rag.reranking import ReRanker
+
+
+reranker = ReRanker()
+
 # =============== Adana ===============
 
 log = logging.getLogger(__name__)
@@ -50,21 +56,24 @@ def get_available_rag_sources() -> List[Dict[str, Union[str, List[str]]]]:
         For collections: {"type": "collection", "collection_names": [collection_name]}
     """
     l_d_rag_sources = []
-
+            
     if os.path.exists(DOCS_TEXT_DIR):
         for filename in os.listdir(DOCS_TEXT_DIR):
             if os.path.isfile(os.path.join(DOCS_TEXT_DIR, filename)):
+                print(f"Adding file source: {filename}")
                 l_d_rag_sources.append({
                     "type": "file",
                     "collection_name": filename
                 })
     else:
         log.warning(f"========== Directory '{DOCS_TEXT_DIR}' does not exist ==========")
-                    
+
+    print("Checking ChromaDB collections")
     # Get ChromaDB collections
     try:
         collections = CHROMA_CLIENT.list_collections()
         for collection in collections:
+            print(f"Adding collection source: {collection.name}")
             l_d_rag_sources.append({
                 "type": "collection",
                 "collection_names": [collection.name]
@@ -72,6 +81,7 @@ def get_available_rag_sources() -> List[Dict[str, Union[str, List[str]]]]:
     except Exception as e:
         log.error(f"Error fetching ChromaDB collections: {e}")
 
+    
     return l_d_rag_sources
 
 async def get_rag_content(rag_type: str, rag_name: str) -> str:
@@ -427,7 +437,7 @@ def get_embedding_function(
 
 def get_rag_context(
     query: str,
-    knowledge_base: knowledgebank.KnowledgeBase,
+    knowledge_base: KnowledgeBase,
     embedding_function: Callable,
     k: int,
     reranking_function: Optional[Callable] = None,
@@ -444,21 +454,37 @@ def get_rag_context(
     :param relevance_threshold: Minimum relevance score for inclusion
     :return: Tuple of (context string, list of citations)
     """
+    
+    #TODO: Use doc_store objects from KnowledgeBase to retrieve documents
+    # This could be called from get_rag_context()
+    # relevant_docs = doc_store.retrieve("document", k=2, embedding_function=lambda x: x)
+    
+    
     # Retrieve relevant documents
     relevant_docs = knowledge_base.retrieve(query, k, embedding_function)
 
     # Rerank if a reranking function is provided
     if reranking_function:
         relevant_docs = reranking_function(query, relevant_docs)
-
+    else:
+        relevant_docs = reranker.rerank_documents(query, relevant_docs)
+        
     # Filter by relevance threshold
     relevant_docs = [doc for doc in relevant_docs if doc.relevance_score >= relevance_threshold]
 
     # Compile context and citations
-    context = "\n\n".join(doc.content for doc in relevant_docs)
-    citations = [{"source": doc.source, "content": doc.content} for doc in relevant_docs]
+    context = "\n\n".join(doc.page_content for doc in relevant_docs)
+    citations = [
+        {
+            "source": doc.source,
+            "page_content": doc.page_content,
+            "metadata": doc.metadata
+        }
+        for doc in relevant_docs
+    ]
 
     return context, citations
+
 
 def get_rag_context_old(
     l_d_files,
